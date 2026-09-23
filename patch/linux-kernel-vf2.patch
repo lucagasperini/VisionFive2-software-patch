@@ -1,0 +1,164 @@
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' '--exclude=work' '--exclude=buildroot' /tmp/VisionFive2/conf/buildroot_initramfs_config /root/VisionFive2/conf/buildroot_initramfs_config
+--- a/conf/buildroot_initramfs_config	2026-09-23 20:45:41.896505484 +0000
++++ b/conf/buildroot_initramfs_config	2026-09-11 09:02:05.740659591 +0000
+@@ -192,6 +192,7 @@
+ BR2_PACKAGE_LIBCURL_VERBOSE=y
+ BR2_PACKAGE_LIBCAP=y
+ BR2_PACKAGE_LIBCAP_TOOLS=y
++BR2_PACKAGE_LIBEVENT=y
+ BR2_PACKAGE_BLUEZ_TOOLS=y
+ BR2_PACKAGE_BLUEZ5_UTILS_OBEX=y
+ BR2_PACKAGE_BLUEZ5_UTILS_CLIENT=y
+@@ -223,9 +224,6 @@
+ BR2_PACKAGE_IPTABLES=y
+ BR2_PACKAGE_IPTABLES_NFTABLES=y
+ BR2_PACKAGE_IW=y
+-BR2_PACKAGE_NTP=y
+-BR2_PACKAGE_NTP_NTPDATE=y
+-BR2_PACKAGE_NTP_NTPTIME=y
+ BR2_PACKAGE_PHYTOOL=y
+ BR2_PACKAGE_SSHPASS=y
+ BR2_PACKAGE_TCPDUMP=y
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' '--exclude=work' '--exclude=buildroot' /tmp/VisionFive2/linux/arch/riscv/configs/starfive_visionfive2_defconfig /root/VisionFive2/linux/arch/riscv/configs/starfive_visionfive2_defconfig
+--- a/linux/arch/riscv/configs/starfive_visionfive2_defconfig	2026-09-23 20:59:18.954377677 +0000
++++ b/linux/arch/riscv/configs/starfive_visionfive2_defconfig	2026-09-17 16:30:57.123012530 +0000
+@@ -39,7 +39,6 @@
+ CONFIG_CPU_FREQ_GOV_CONSERVATIVE=y
+ CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+ CONFIG_CPUFREQ_DT=y
+-# CONFIG_SECCOMP is not set
+ CONFIG_MODULES=y
+ CONFIG_MODULE_UNLOAD=y
+ CONFIG_BINFMT_MISC=y
+@@ -116,6 +115,7 @@
+ CONFIG_MD=y
+ CONFIG_BLK_DEV_DM=m
+ CONFIG_NETDEVICES=y
++CONFIG_TUN=y
+ CONFIG_VIRTIO_NET=y
+ # CONFIG_NET_VENDOR_ALACRITECH is not set
+ # CONFIG_NET_VENDOR_AMAZON is not set
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' '--exclude=work' '--exclude=buildroot' /tmp/VisionFive2/linux/drivers/gpu/drm/img/img-rogue/services/server/common/pmr.c /root/VisionFive2/linux/drivers/gpu/drm/img/img-rogue/services/server/common/pmr.c
+--- a/linux/drivers/gpu/drm/img/img-rogue/services/server/common/pmr.c	2026-09-23 20:56:59.820094752 +0000
++++ b/linux/drivers/gpu/drm/img/img-rogue/services/server/common/pmr.c	2026-09-22 19:54:04.328078841 +0000
+@@ -84,6 +84,7 @@
+ /* ourselves */
+ #include "pmr.h"
+ 
++#include <linux/dma-resv.h>
+ #if defined(PVRSRV_ENABLE_LINUX_MMAP_STATS)
+ #include "mmap_stats.h"
+ #endif
+@@ -182,6 +183,9 @@
+ 	/* Lock for this structure */
+ 	POS_LOCK hLock;
+ 
++	/* Canonical Linux implicit-sync object for this PMR. */
++	struct dma_resv sDmaResv;
++
+ 	/* Incrementing serial number to each allocation. */
+ 	IMG_UINT64 uiSerialNum;
+ 
+@@ -448,6 +452,8 @@
+ 		return eError;
+ 	}
+ 
++	dma_resv_init(&psPMR->sDmaResv);
++
+ 	/* Setup the PMR */
+ 	OSAtomicWrite(&psPMR->iRefCount, 0);
+ 
+@@ -590,6 +596,9 @@
+ 			psPMR->psFuncTab->pfnReleasePMRFactoryLock();
+ 		}
+ 
++		/* No dma-buf export can outlive the PMR reference it owns. */
++		dma_resv_fini(&psPMR->sDmaResv);
++
+ 		OSFreeMem(psPMR);
+ 
+ 		/* Decrement live PMR count. Probably only of interest for debugging */
+@@ -1654,6 +1663,13 @@
+ 	return PVRSRV_OK;
+ }
+ 
++struct dma_resv *
++PMR_GetDmaResv(PMR *psPMR)
++{
++	PVR_ASSERT(psPMR != NULL);
++	return &psPMR->sDmaResv;
++}
++
+ PVRSRV_DEVICE_NODE *
+ PMR_DeviceNode(const PMR *psPMR)
+ {
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' '--exclude=work' '--exclude=buildroot' /tmp/VisionFive2/linux/drivers/gpu/drm/img/img-rogue/services/server/env/linux/physmem_dmabuf.c /root/VisionFive2/linux/drivers/gpu/drm/img/img-rogue/services/server/env/linux/physmem_dmabuf.c
+--- a/linux/drivers/gpu/drm/img/img-rogue/services/server/env/linux/physmem_dmabuf.c	2026-09-23 20:56:59.836094555 +0000
++++ b/linux/drivers/gpu/drm/img/img-rogue/services/server/env/linux/physmem_dmabuf.c	2026-09-22 19:54:04.328078841 +0000
+@@ -749,6 +749,7 @@
+                     IMG_INT *piFd)
+ {
+ 	struct dma_buf *psDmaBuf;
++	struct dma_buf *psBackingDmaBuf;
+ 	IMG_DEVMEM_SIZE_T uiPMRSize;
+ 	PVRSRV_ERROR eError;
+ 	IMG_INT iFd;
+@@ -768,6 +769,15 @@
+ 		sDmaBufExportInfo.size  = uiPMRSize;
+ 		sDmaBufExportInfo.flags = O_RDWR;
+ 
++		/*
++		 * Preserve the backing dma-buf reservation object on re-export.
++		 * Native PMRs use the reservation object owned by the PMR itself.
++		 */
++		psBackingDmaBuf = PhysmemGetDmaBuf(psPMR);
++		sDmaBufExportInfo.resv = psBackingDmaBuf ?
++					 psBackingDmaBuf->resv :
++					 PMR_GetDmaResv(psPMR);
++
+ 		psDmaBuf = dma_buf_export(&sDmaBufExportInfo);
+ 	}
+ #elif (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 17, 0))
+@@ -785,7 +795,6 @@
+ 		eError = PVRSRV_ERROR_OUT_OF_MEMORY;
+ 		goto fail_pmr_ref;
+ 	}
+-
+ 	iFd = dma_buf_fd(psDmaBuf, O_RDWR);
+ 	if (iFd < 0)
+ 	{
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' '--exclude=work' '--exclude=buildroot' /tmp/VisionFive2/linux/drivers/gpu/drm/img/img-rogue/services/server/env/linux/pvr_buffer_sync.c /root/VisionFive2/linux/drivers/gpu/drm/img/img-rogue/services/server/env/linux/pvr_buffer_sync.c
+--- a/linux/drivers/gpu/drm/img/img-rogue/services/server/env/linux/pvr_buffer_sync.c	2026-09-23 20:56:59.836094555 +0000
++++ b/linux/drivers/gpu/drm/img/img-rogue/services/server/env/linux/pvr_buffer_sync.c	2026-09-22 19:54:04.328078841 +0000
+@@ -44,6 +44,7 @@
+ #include <linux/dma-buf.h>
+ 
+ #include "services_kernel_client.h"
++#include "pmr.h"
+ #include "pvr_dma_resv.h"
+ #include "pvr_buffer_sync.h"
+ #include "pvr_buffer_sync_shared.h"
+@@ -83,7 +84,7 @@
+ 	if (dmabuf)
+ 		return dmabuf->resv;
+ 
+-	return NULL;
++	return PMR_GetDmaResv(pmr);
+ }
+ 
+ static int
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' '--exclude=work' '--exclude=buildroot' /tmp/VisionFive2/linux/drivers/gpu/drm/img/img-rogue/services/server/include/pmr.h /root/VisionFive2/linux/drivers/gpu/drm/img/img-rogue/services/server/include/pmr.h
+--- a/linux/drivers/gpu/drm/img/img-rogue/services/server/include/pmr.h	2026-09-23 20:56:59.840094506 +0000
++++ b/linux/drivers/gpu/drm/img/img-rogue/services/server/include/pmr.h	2026-09-22 19:54:04.328078841 +0000
+@@ -508,6 +508,11 @@
+ PVRSRV_ERROR
+ PMRUnrefUnlockPMR(PMR *psPMR);
+ 
++struct dma_resv;
++
++/* Canonical Linux implicit-sync reservation object for native PMRs. */
++struct dma_resv *PMR_GetDmaResv(PMR *psPMR);
++
+ PPVRSRV_DEVICE_NODE
+ PMR_DeviceNode(const PMR *psPMR);
+ 

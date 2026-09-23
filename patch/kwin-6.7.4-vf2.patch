@@ -1,0 +1,295 @@
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/kwin-6.7.4/src/backends/drm/drm_egl_layer_surface.cpp /root/kwin-6.7.4/src/backends/drm/drm_egl_layer_surface.cpp
+--- a/src/backends/drm/drm_egl_layer_surface.cpp	2026-08-04 09:21:52.000000000 +0000
++++ b/src/backends/drm/drm_egl_layer_surface.cpp	2026-09-23 19:54:04.930144211 +0000
+@@ -418,20 +418,26 @@
+         }
+         return nullptr;
+     };
++
++    // VF2_KWIN_CPU_COPY_POLICY
++    // Opt-in: keep upstream selection unless explicitly enabled.
++    const bool forceCpuCopy = qEnvironmentVariableIntValue("KWIN_DRM_FORCE_CPU_COPY") > 0;
++    if (forceCpuCopy && bufferTarget == BufferTarget::Normal) {
++        if (auto surface = doTestFormats(sortedFormats, MultiGpuImportMode::DumbBuffer)) {
++            qCDebug(KWIN_DRM) << "KWIN_DRM_FORCE_CPU_COPY: using DumbBuffer CPU transfer";
++            return surface;
++        }
++        qCWarning(KWIN_DRM) << "KWIN_DRM_FORCE_CPU_COPY: failed to create DumbBuffer CPU transfer surface";
++        return nullptr;
++    }
+     if (m_gpu == m_eglBackend->gpu()) {
+         return doTestFormats(sortedFormats, MultiGpuImportMode::None);
+     }
+-    // special case, we're using different display devices but the same render device
+     const auto device = m_gpu->renderDevice();
+     if (device && !device->eglDisplay()->renderNode().isEmpty() && device->eglDisplay()->renderNode() == m_eglBackend->eglDisplayObject()->renderNode()) {
+-        if (auto surface = doTestFormats(sortedFormats, MultiGpuImportMode::None)) {
+-            return surface;
+-        }
+-    }
+-    if (auto surface = doTestFormats(sortedFormats, MultiGpuImportMode::GpuCopy)) {
+-        // qCDebug(KWIN_DRM) << "chose egl import with format" << formatName(surface->gbmSwapchain->format()).name << "and modifier" << surface->gbmSwapchain->modifier();
+-        return surface;
++        if (auto surface = doTestFormats(sortedFormats, MultiGpuImportMode::None)) return surface;
+     }
++    if (auto surface = doTestFormats(sortedFormats, MultiGpuImportMode::GpuCopy)) return surface;
+     if (auto surface = doTestFormats(sortedFormats, MultiGpuImportMode::DumbBuffer)) {
+         qCDebug(KWIN_DRM) << "chose cpu import with format" << formatName(surface->gbmSwapchain->format()).name << "and modifier" << surface->gbmSwapchain->modifier();
+         return surface;
+@@ -444,6 +450,14 @@
+     const bool cpuCopy = importMode == MultiGpuImportMode::DumbBuffer || bufferTarget == BufferTarget::Dumb;
+     auto ret = std::make_unique<Surface>();
+     ModifierList renderModifiers = m_eglBackend->eglDisplayObject()->nonExternalOnlySupportedDrmFormats()[format];
++
++    // PVR workaround:
++    // The driver reports all RGB modifiers as externalOnly.
++
++    if (renderModifiers.empty()) {
++        qCDebug(KWIN_DRM) << "PVR: nonExternalOnly empty, injecting LINEAR";
++        renderModifiers.insert(DRM_FORMAT_MOD_LINEAR);
++    }
+     if (importMode == MultiGpuImportMode::GpuCopy) {
+         if (!m_eglBackend->gpu()->renderDevice()
+             || !m_gpu->renderDevice()
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/kwin-6.7.4/src/backends/drm/drm_gpu.cpp /root/kwin-6.7.4/src/backends/drm/drm_gpu.cpp
+--- a/src/backends/drm/drm_gpu.cpp	2026-08-04 09:21:52.000000000 +0000
++++ b/src/backends/drm/drm_gpu.cpp	2026-09-23 20:12:03.726262387 +0000
+@@ -951,28 +951,32 @@
+     }
+ 
+     uint32_t handles[] = {0, 0, 0, 0};
+-    auto cleanup = qScopeGuard([this, &handles]() {
++    bool importedHandles[] = {false, false, false, false};
++    auto cleanup = qScopeGuard([this, &handles, &importedHandles]() {
+         for (int i = 0; i < 4; ++i) {
+-            if (handles[i] == 0) {
+-                continue;
+-            }
++            if (!handles[i] || !importedHandles[i]) continue;
+             bool closed = false;
+             for (int j = 0; j < i; ++j) {
+-                if (handles[i] == handles[j]) {
+-                    closed = true;
+-                    break;
+-                }
+-            }
+-            if (closed) {
+-                continue;
++                if (importedHandles[j] && handles[i] == handles[j]) { closed = true; break; }
+             }
+-            drmCloseBufferHandle(m_fd, handles[i]);
++            if (!closed) drmCloseBufferHandle(m_fd, handles[i]);
+         }
+     });
+-    for (int i = 0; i < attributes->planeCount; ++i) {
+-        if (drmPrimeFDToHandle(m_fd, attributes->fd[i].get(), &handles[i]) != 0) {
+-            qCWarning(KWIN_DRM) << "drmPrimeFDToHandle() failed";
+-            return nullptr;
++
++    // VF2_KWIN_LOCAL_DUMB_HANDLE
++    const auto localDumb = gbmDumbBufferInfo(buffer);
++    if (localDumb && localDumb->drmFd == m_fd && attributes->planeCount == 1) {
++        handles[0] = localDumb->handle;
++        qCDebug(KWIN_DRM) << "VF2_KWIN_LOCAL_DUMB_HANDLE: using local GEM handle" << handles[0];
++    } else {
++        for (int i = 0; i < attributes->planeCount; ++i) {
++            errno = 0;
++            if (drmPrimeFDToHandle(m_fd, attributes->fd[i].get(), &handles[i]) != 0) {
++                const int e = errno;
++                qCWarning(KWIN_DRM) << "drmPrimeFDToHandle() failed: errno " << strerror(e);
++                return nullptr;
++            }
++            importedHandles[i] = true;
+         }
+     }
+ 
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/kwin-6.7.4/src/core/gbmgraphicsbufferallocator.cpp /root/kwin-6.7.4/src/core/gbmgraphicsbufferallocator.cpp
+--- a/src/core/gbmgraphicsbufferallocator.cpp	2026-08-04 09:21:52.000000000 +0000
++++ b/src/core/gbmgraphicsbufferallocator.cpp	2026-09-22 22:18:21.657397063 +0000
+@@ -97,6 +97,8 @@
+     QSize size() const override;
+     bool hasAlphaChannel() const override;
+     const DmaBufAttributes *dmabufAttributes() const override;
++    int drmFd() const { return m_drmFd; }
++    uint32_t drmHandle() const { return m_handle; }
+ 
+ private:
+     int m_drmFd;
+@@ -107,6 +109,15 @@
+     bool m_hasAlphaChannel;
+ };
+ 
++// VF2_KWIN_LOCAL_DUMB_HANDLE_IMPL
++std::optional<GbmDumbBufferInfo> gbmDumbBufferInfo(GraphicsBuffer *buffer)
++{
++    auto *dumb = qobject_cast<DumbGraphicsBuffer *>(buffer);
++    if (!dumb) return std::nullopt;
++    return GbmDumbBufferInfo{dumb->drmFd(), dumb->drmHandle()};
++}
++
++
+ GbmGraphicsBufferAllocator::GbmGraphicsBufferAllocator(gbm_device *device, dev_t deviceId)
+     : m_gbmDevice(device)
+     , m_deviceId(deviceId)
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/kwin-6.7.4/src/core/gbmgraphicsbufferallocator.h /root/kwin-6.7.4/src/core/gbmgraphicsbufferallocator.h
+--- a/src/core/gbmgraphicsbufferallocator.h	2026-08-04 09:21:52.000000000 +0000
++++ b/src/core/gbmgraphicsbufferallocator.h	2026-09-22 22:18:21.657232249 +0000
+@@ -5,6 +5,8 @@
+ */
+ 
+ #pragma once
++#include <optional>
++#include <cstdint>
+ 
+ #include "core/graphicsbufferallocator.h"
+ 
+@@ -15,6 +17,11 @@
+ namespace KWin
+ {
+ 
++// VF2_KWIN_LOCAL_DUMB_HANDLE_API
++class GraphicsBuffer;
++struct KWIN_EXPORT GbmDumbBufferInfo { int drmFd; uint32_t handle; };
++KWIN_EXPORT std::optional<GbmDumbBufferInfo> gbmDumbBufferInfo(GraphicsBuffer *buffer);
++
+ class KWIN_EXPORT GbmGraphicsBufferAllocator : public GraphicsBufferAllocator
+ {
+ public:
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/kwin-6.7.4/src/opengl/base.frag /root/kwin-6.7.4/src/opengl/base.frag
+--- a/src/opengl/base.frag	2026-08-04 09:21:52.000000000 +0000
++++ b/src/opengl/base.frag	2026-09-23 20:19:41.396285465 +0000
+@@ -14,7 +14,6 @@
+ #endif
+ 
+ #if TRAIT_MAP_EXTERNAL_TEXTURE
+-#extension GL_OES_EGL_image_external : require
+ uniform samplerExternalOES sampler;
+ in vec2 texcoord0;
+ #endif
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/kwin-6.7.4/src/opengl/eglbackend.cpp /root/kwin-6.7.4/src/opengl/eglbackend.cpp
+--- a/src/opengl/eglbackend.cpp	2026-08-04 09:21:52.000000000 +0000
++++ b/src/opengl/eglbackend.cpp	2026-09-23 20:23:01.023345684 +0000
+@@ -137,6 +137,25 @@
+             const bool externalOnlySupported = withExternalOnlyYUV && info && info->yuvConversion();
+             ModifierList modifiers = externalOnlySupported ? *it : nonExternalOnly[it.key()];
+ 
++            /*
++            * PVR TEST:
++            * The PVR driver reports RGB LINEAR as externalOnly.
++            * Keep KWin's internal nonExternalOnly capabilities unchanged, but
++            * advertise LINEAR for the common RGB formats to Wayland clients.
++            */
++            if (modifiers.empty() && it->contains(DRM_FORMAT_MOD_LINEAR)) {
++                switch (it.key()) {
++                    case DRM_FORMAT_ARGB8888:
++                    case DRM_FORMAT_XRGB8888:
++                    case DRM_FORMAT_ABGR8888:
++                    case DRM_FORMAT_XBGR8888:
++                        modifiers.insert(DRM_FORMAT_MOD_LINEAR);
++                        break;
++                    default:
++                        break;
++                }
++	    }
++
+             if (externalOnlySupported && !modifiers.empty()) {
+                 if (auto yuv = info->yuvConversion()) {
+                     for (auto plane : std::as_const(yuv->plane)) {
+@@ -267,6 +286,23 @@
+     if (auto it = nonExternalOnly.find(buffer->dmabufAttributes()->format); it != nonExternalOnly.end() && it->contains(buffer->dmabufAttributes()->modifier)) {
+         return importBufferAsImage(buffer) != EGL_NO_IMAGE_KHR;
+     }
++    // PVR TEST: RGB LINEAR advertised explicitly in initWayland()
++    const auto attrs = buffer->dmabufAttributes();
++
++    if (attrs->modifier == DRM_FORMAT_MOD_LINEAR) {
++        switch (attrs->format) {
++        case DRM_FORMAT_ARGB8888:
++        case DRM_FORMAT_XRGB8888:
++        case DRM_FORMAT_ABGR8888:
++        case DRM_FORMAT_XBGR8888: {
++            const EGLImageKHR image = importBufferAsImage(buffer);
++            return image != EGL_NO_IMAGE_KHR;
++        }
++        default:
++            break;
++        }
++    }
++
+     // external_only buffers aren't used as a single EGLImage, import them separately
+     const auto info = FormatInfo::get(buffer->dmabufAttributes()->format);
+     if (!info || !info->yuvConversion()) {
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/kwin-6.7.4/src/opengl/glshader.cpp /root/kwin-6.7.4/src/opengl/glshader.cpp
+--- a/src/opengl/glshader.cpp	2026-08-04 09:21:52.000000000 +0000
++++ b/src/opengl/glshader.cpp	2026-09-23 17:35:16.819706952 +0000
+@@ -94,6 +94,7 @@
+             }
+         }
+         if (context->isOpenGLES()) {
++            ret.append("#extension GL_OES_EGL_image_external : enable\n");
+             ret.append("precision highp float;\n");
+             ret.append("precision highp sampler2D;\n");
+             ret.append("precision highp sampler3D;\n");
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/kwin-6.7.4/src/scene/itemrenderer_opengl.cpp /root/kwin-6.7.4/src/scene/itemrenderer_opengl.cpp
+--- a/src/scene/itemrenderer_opengl.cpp	2026-08-04 09:21:53.000000000 +0000
++++ b/src/scene/itemrenderer_opengl.cpp	2026-09-22 23:49:30.127126341 +0000
+@@ -249,7 +249,11 @@
+         if (texture && !texture->planes().isEmpty()) {
+             if (!geometry.isEmpty()) {
+                 RenderNode &renderNode = context->renderNodes.emplace_back(RenderNode{
+-                    .traits = texture->planes().count() == 1 ? ShaderTrait::MapTexture : ShaderTrait::MapMultiPlaneTexture,
++                    .traits = texture->planes().count() == 1
++                        ? (texture->planes().at(0)->target() == GL_TEXTURE_EXTERNAL_OES
++                               ? ShaderTrait::MapExternalTexture
++                               : ShaderTrait::MapTexture)
++                        : ShaderTrait::MapMultiPlaneTexture,
+                     .textures = texture->planes(),
+                     .geometry = geometry,
+                     .transformMatrix = context->transformStack.top(),
+@@ -469,7 +473,7 @@
+                 shader->setUniform(GLShader::Vec3Uniform::PrimaryBrightness, QVector3D(toXYZ(1, 0), toXYZ(1, 1), toXYZ(1, 2)));
+             }
+ 
+-            if (traits & ShaderTrait::MapTexture) {
++            if ((traits & ShaderTrait::MapTexture) || (traits & ShaderTrait::MapExternalTexture)) {
+                 shader->setUniform(GLShader::IntUniform::Sampler, 0);
+             } else if (traits & ShaderTrait::MapMultiPlaneTexture) {
+                 shader->setUniform(GLShader::IntUniform::Sampler, 0);
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/kwin-6.7.4/src/scene/opengl/texture.cpp /root/kwin-6.7.4/src/scene/opengl/texture.cpp
+--- a/src/scene/opengl/texture.cpp	2026-08-04 09:21:53.000000000 +0000
++++ b/src/scene/opengl/texture.cpp	2026-09-23 20:25:20.204929650 +0000
+@@ -251,7 +251,6 @@
+         return;
+     }
+ 
+-    const GLint target = GL_TEXTURE_2D;
+     if (auto itConv = FormatInfo::s_drmConversions.find(buffer->dmabufAttributes()->format); itConv != FormatInfo::s_drmConversions.end()) {
+         Q_ASSERT(itConv->plane.count() == uint(buffer->dmabufAttributes()->planeCount));
+         for (uint plane = 0; plane < itConv->plane.count(); ++plane) {
+@@ -260,12 +259,26 @@
+             size.rwidth() /= currentPlane.widthDivisor;
+             size.rheight() /= currentPlane.heightDivisor;
+ 
++	    const auto attribs = buffer->dmabufAttributes();
++
++            const GLenum target =
++                m_backend->eglDisplayObject()->isExternalOnly(
++                    currentPlane.format, attribs->modifier)
++                    ? GL_TEXTURE_EXTERNAL_OES
++                    : GL_TEXTURE_2D;
++
+             m_planes[plane]->bind();
+             glEGLImageTargetTexture2DOES(target, static_cast<GLeglImageOES>(m_backend->importBufferAsImage(buffer, plane, currentPlane.format, size)));
+             m_planes[plane]->unbind();
+         }
+     } else {
+         Q_ASSERT(m_planes.count() == 1);
++
++	const auto attribs = buffer->dmabufAttributes();
++	const GLenum target =
++    		m_backend->eglDisplayObject()->isExternalOnly(attribs->format,
++                      attribs->modifier) ? GL_TEXTURE_EXTERNAL_OES : GL_TEXTURE_2D;
++
+         m_planes[0]->bind();
+         glEGLImageTargetTexture2DOES(target, static_cast<GLeglImageOES>(m_backend->importBufferAsImage(buffer)));
+         m_planes[0]->unbind();

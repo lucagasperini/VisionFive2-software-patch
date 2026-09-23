@@ -1,0 +1,24 @@
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/mesa-22.1.7/src/egl/drivers/dri2/platform_wayland.c /root/mesa-22.1.7/src/egl/drivers/dri2/platform_wayland.c
+--- a/src/egl/drivers/dri2/platform_wayland.c	2026-09-23 20:29:29.714162603 +0000
++++ b/src/egl/drivers/dri2/platform_wayland.c	2026-09-23 20:36:08.741201473 +0000
+@@ -1597,7 +1597,19 @@
+    query = dri2_dpy->image->queryImage(image, __DRI_IMAGE_ATTRIB_WIDTH, &width);
+    query &= dri2_dpy->image->queryImage(image, __DRI_IMAGE_ATTRIB_HEIGHT,
+                                         &height);
+-   query &= get_fourcc(dri2_dpy, image, &fourcc);
++   /*
++    * Some PowerVR DDKs fail __DRI_IMAGE_ATTRIB_FOURCC queries for
++    * Wayland back-buffer images, even though the image was created
++    * for the format selected for this EGL surface.
++    *
++    * Prefer the FOURCC reported by the DRI image.  If that query
++    * fails, fall back to the format already selected for the
++    * Wayland surface.
++   */
++   if (!get_fourcc(dri2_dpy, image, &fourcc)) {
++      fourcc = dri2_surf->format;
++   }
++
+    if (!query)
+       return NULL;
+ 

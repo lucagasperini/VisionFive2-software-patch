@@ -1,0 +1,12 @@
+diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' '--exclude=build-*' '--exclude=obj-*' '--exclude=*.o' '--exclude=*.a' '--exclude=*.so' '--exclude=*.so.*' '--exclude=*.orig' '--exclude=*.rej' '--exclude=*.pre-*' '--exclude=*~' '--exclude=__pycache__' /tmp/qt6-wayland-6.10.2/src/compositor/configure.cmake /root/qt6-wayland-6.10.2/src/compositor/configure.cmake
+--- a/src/compositor/configure.cmake	2026-01-22 19:41:58.000000000 +0000
++++ b/src/compositor/configure.cmake	2026-09-21 20:56:33.350908227 +0000
+@@ -18,7 +18,7 @@
+     qt_internal_disable_find_package_global_promotion(Libdrm::Libdrm)
+ endif()
+ qt_find_package(Libdrm PROVIDED_TARGETS Libdrm::Libdrm MODULE_NAME gui QMAKE_LIB drm MARK_OPTIONAL)
+-
++qt_find_package(EGL)
+ 
+ #### Tests
+ 
