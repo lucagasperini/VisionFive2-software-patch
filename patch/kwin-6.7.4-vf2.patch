@@ -83,7 +83,7 @@ diff -urN '--exclude=.git' '--exclude=.pc' '--exclude=debian' '--exclude=build' 
      });
 -    for (int i = 0; i < attributes->planeCount; ++i) {
 -        if (drmPrimeFDToHandle(m_fd, attributes->fd[i].get(), &handles[i]) != 0) {
--            qCWarning(KWIN_DRM) << "drmPrimeFDToHandle() failed";
+-            qCDebug(KWIN_DRM) << "drmPrimeFDToHandle() failed";
 -            return nullptr;
 +
 +    // VF2_KWIN_LOCAL_DUMB_HANDLE
